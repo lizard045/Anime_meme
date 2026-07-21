@@ -1,0 +1,39 @@
+# 攝影機動作辨識 Meme 顯示工具 - 設定檔
+# 所有數值都可以依照自己的鏡頭/環境/手型調整，不需要改程式碼。
+
+camera:
+  index: 0          # 攝影機編號，若有多個鏡頭可嘗試 1、2...
+  width: 640        # 實測這台鏡頭原生最高只能到 640x480，要求更大的話鏡頭會自動降級
+  height: 480
+  fps: 30           # 向攝影機請求的擷取 FPS，實際能跑多快還是取決於鏡頭硬體本身支援的上限
+  mirror: true      # 是否水平翻轉畫面（像鏡子一樣），大多數情況建議開啟
+
+detection:
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  max_width: 480    # 手勢/姿勢偵測用的畫面寬度上限，數值越小偵測越快但太小可能影響準確度
+                     # （畫面顯示與關鍵點繪製不受影響，一律用攝影機原始解析度）
+
+gesture:
+  enabled: true     # 是否啟用手勢/姿勢偵測
+
+stabilizer:
+  hold_frames: 6                # 同一個標籤要連續偵測到幾帳才算數，避免誤判閃爍
+  cooldown_seconds: 2.5         # 同一個標籤觸發後，多久內不會再重複觸發
+  switch_cooldown_seconds: 0.5  # 切換到不同標籤時，至少要間隔多久
+
+popup:
+  width: 400
+  height: 400
+  duration_seconds: 3.0
+  position: "center-right"   # top-right / top-left / bottom-right / bottom-left / center / center-right（螢幕右半邊、垂直置中）
+
+debug:
+  show_metrics: true    # 在主視窗下方顯示目前偵測到的手勢文字與單手形狀，方便除錯
+  draw_landmarks: true  # 在畫面上畫出偵測到的關鍵點
+
+models:
+  # MediaPipe Tasks 需要的模型檔路徑，第一次使用前請執行:
+  #   python scripts/download_models.py
+  hand_landmarker_path: "models/hand_landmarker.task"
+  pose_landmarker_path: "models/pose_landmarker_lite.task"
