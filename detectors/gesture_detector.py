@@ -1,7 +1,7 @@
 """手勢與姿勢偵測：整合 MediaPipe Tasks 的 HandLandmarker + PoseLandmarker，
-並用幾何規則（手指關節角度、手掌形狀、手與身體關鍵點的相對位置）判斷 6 種手勢標籤。
+並用幾何規則（手指關節角度、手掌形狀、手與身體關鍵點的相對位置）判斷手勢標籤。
 
-6 種手勢對應的 meme 與動作描述（詳見 scripts/action.md）：
+原本 6 種手勢對應的 meme 與動作描述（詳見 scripts/action.md）：
 - pointing_finger      及川徹：手臂伸直、且食指伸直指向遠方，其他手指彎曲
 - claw_reach           綠谷出久：單手四指微彎、朝外伸展（不是完全握拳也不是完全伸直）
 - double_fist_stacked  布瑠部由良由良：雙手都握拳，在胸前一上一下疊在一起
@@ -9,6 +9,20 @@
                        一手手肘彎曲讓手朝上、另一手讓手朝下/朝前
 - cover_one_eye        阿嬤特拉斯：單手五指張開放在臉前，剛好遮住一隻眼睛、另一隻眼睛露出
 - josuke_pose          東方仗助：一手五指張開貼臉側，另一手五指伸直併攏貼在下巴附近
+
+另外新增 5 種「領域展開」相關手勢：
+- yuta_domain          乙骨優太（真贋相愛）：一手握拳（手掌朝下），另一手四指伸直朝外、拇指內縮
+- sukuna_domain        宿儺：雙手手指緊密交疊，舉在嘴巴前面（不是單手動作；因為手指遮擋嚴重，
+                       主要靠「雙手貼在一起 + 靠近嘴巴」的位置判斷，不特別檢查手指細節）
+- hakari_domain        秤金次（坐殺博徒）：一手拇指+食指捏成圈（類似 OK 手勢，其餘三指伸直），
+                       另一手在下方、四指伸直
+- gojo_domain          五條悟（無量空處）：單手食指伸直，中指彎曲並與食指指尖捏合在一起，
+                       無名指、小指彎曲收起（類似打彈指前的預備動作）
+- reverse_cross_palms  反叉合掌（雙手合十、中指與無名指互相交叉的通用結印）：
+                       雙手手腕緊貼在一起、且都不是握拳/rock 手勢
+                       ⚠️ 這個手勢手指深度交疊，遮擋嚴重，用單一 RGB 鏡頭的關鍵點模型
+                       很難精準辨識實際的手指交叉細節，這裡改用「雙手手腕貼在一起」做
+                       近似判斷，穩定度會比其他手勢差，需要依實測狀況調整門檻。
 
 注意：MediaPipe 從 0.10.31 版開始移除了舊版的 ``mp.solutions`` API，
 所以這裡改用新版的 Tasks API（``mediapipe.tasks.python.vision``），
@@ -71,6 +85,26 @@ EYE_COVER_MARGIN = 0.02
 FACE_SIDE_MAX_DIST = 0.28
 CHIN_MAX_DIST = 0.25
 
+# 指尖捏合（拇指碰另一指指尖，例如 OK 手勢、彈指手勢）的距離門檻（相對手掌大小）
+# 故意放寬一點（原本 0.35 太嚴格，實測手指沒有完全碰到指尖也常判斷不出來）
+PINCH_MAX_RATIO = 0.42
+
+# 宿儺手勢：食指、小指彎曲角度上限（> 這個角度就不算彎曲）；
+# 中指、無名指的「伸直」門檻用比一般更寬鬆的數值（不用完全伸直到 160 度）；
+# 以及中指、無名指指尖互碰的距離門檻（不用完全貼緊，靠近就算）
+# 這三個門檻原本設太嚴格，實測很難剛好卡進區間，故意放寬一點
+SUKUNA_BENT_ANGLE_MAX = 155.0
+SUKUNA_STRAIGHT_MIN = 145.0
+SUKUNA_TOUCH_MAX_RATIO = 0.25
+
+# 反叉合掌：雙手手腕距離小於這個比例（正規化座標），視為「雙手合十貼在一起」
+PALMS_TOUCH_MAX_DIST = 0.08
+
+# 宿儺手勢（雙手版）：雙手手指緊密交疊舉在嘴巴前面，手腕距離門檻比反叉合掌寬鬆一點
+# （兩手交疊時手腕本身不一定完全貼在一起），但額外要求「舉在嘴巴附近」，
+# 用這個位置限制跟位置更自由的反叉合掌（reverse_cross_palms）做區分
+SUKUNA_HANDS_TOGETHER_MAX_DIST = 0.22
+
 # Pose landmark 索引（MediaPipe Pose 33 點）
 POSE_NOSE = 0
 POSE_LEFT_EYE = 2
@@ -121,10 +155,19 @@ def _fingertip_spread(points, hand_size: float) -> float:
     return sum(gaps) / len(gaps)
 
 
+def _tip_distance_ratio(points, idx_a: int, idx_b: int, hand_size: float) -> float:
+    """回傳兩個指尖 landmark 索引之間的距離（相對手掌大小），用來判斷是否「捏合/互碰」。"""
+    return distance(points[idx_a], points[idx_b]) / hand_size
+
+
 def _classify_hand_shape(points) -> str | None:
     """依單手 21 個關鍵點，判斷手掌形狀（純形狀，不含位置資訊）。
 
     回傳值：
+    - "ok_sign": 拇指、食指指尖捏合成一個圈，中指、無名指、小指都伸直（秤金次「坐殺博徒」用）
+    - "snap_pinch": 食指伸直，中指彎曲並與食指指尖捏合在一起，無名指、小指彎曲收起
+      （五條悟「無量空處」用；跟 ok_sign 的差別在捏合的是食指+中指而不是拇指+食指）
+    - "sukuna_mudra": 食指、小指彎曲，中指、無名指伸直且指尖互碰（宿儺用）
     - "rock_horns": 食指、小指伸直，中指、無名指彎曲（類似 rock 手勢，敗者食塵用）
     - "pointing": 只有食指伸直，其他三指都彎曲（及川徹用，另外還需搭配手臂伸直，見 _is_arm_extended）
     - "fist": 四指（食指~小指）都「完全彎曲」（角度 < FIST_ANGLE_MAX），視為緊握拳頭
@@ -138,6 +181,31 @@ def _classify_hand_shape(points) -> str | None:
     straight = {finger: angles[finger] >= STRAIGHT_ANGLE_THRESHOLD for finger in FINGER_JOINTS}
     fist_tight = {finger: angles[finger] < FIST_ANGLE_MAX for finger in FOUR_FINGERS}
     hand_size = distance(points[0], points[9]) or 1e-6
+
+    thumb_index_ratio = _tip_distance_ratio(points, 4, 8, hand_size)
+    index_middle_ratio = _tip_distance_ratio(points, 8, 12, hand_size)
+    middle_ring_ratio = _tip_distance_ratio(points, 12, 16, hand_size)
+
+    if thumb_index_ratio < PINCH_MAX_RATIO and straight["middle"] and straight["ring"] and straight["pinky"]:
+        return "ok_sign"
+
+    if (
+        straight["index"]
+        and index_middle_ratio < PINCH_MAX_RATIO
+        and not straight["middle"]
+        and not straight["ring"]
+        and not straight["pinky"]
+    ):
+        return "snap_pinch"
+
+    if (
+        angles["index"] < SUKUNA_BENT_ANGLE_MAX
+        and angles["pinky"] < SUKUNA_BENT_ANGLE_MAX
+        and angles["middle"] >= SUKUNA_STRAIGHT_MIN
+        and angles["ring"] >= SUKUNA_STRAIGHT_MIN
+        and middle_ring_ratio < SUKUNA_TOUCH_MAX_RATIO
+    ):
+        return "sukuna_mudra"
 
     if straight["index"] and straight["pinky"] and not straight["middle"] and not straight["ring"]:
         return "rock_horns"
@@ -201,6 +269,11 @@ def _is_one_up_one_down(wrist_a, wrist_b, pose_points) -> bool:
     return {dir_a, dir_b} == {"up", "down"}
 
 
+def _is_palms_touching(wrist_a, wrist_b) -> bool:
+    """判斷兩手腕是否緊貼在一起（反叉合掌的雙手手掌根部會貼在一起）。"""
+    return distance(wrist_a, wrist_b) < PALMS_TOUCH_MAX_DIST
+
+
 def _covers_one_eye(hand_points, pose_points) -> bool:
     """判斷這隻手的 bounding box 是否剛好蓋住其中一隻眼睛、另一隻眼睛沒被蓋住。"""
     xs = [p[0] for p in hand_points]
@@ -228,8 +301,10 @@ class GestureDetector:
     """整合手部與姿勢偵測，回傳目前畫面判斷到的手勢標籤（可能為 None）。
 
     偵測優先序：
-    1. 雙手同時符合的組合手勢（依序檢查 fist_up_down > double_fist_stacked > josuke_pose）
-    2. 單手形狀手勢（pointing_finger > claw_reach > cover_one_eye）
+    1. 雙手同時符合的組合手勢（依序檢查
+       fist_up_down > double_fist_stacked > yuta_domain > hakari_domain >
+       sukuna_domain > reverse_cross_palms > josuke_pose）
+    2. 單手形狀手勢（pointing_finger > claw_reach > sukuna_domain(備援) > gojo_domain > cover_one_eye）
 
     pointing_finger 與 claw_reach 容易搞混（因為 claw 手勢的手指可能微伸到接近伸直），
     所以 pointing_finger 額外要求「手臂伸直」（肩-肘-腕夾角 >= ARM_STRAIGHT_ANGLE_MIN），
@@ -238,6 +313,17 @@ class GestureDetector:
     cover_one_eye 與 josuke_pose 也容易搞混（兩者都會有一隻張開的手靠近臉），
     所以 cover_one_eye 限制「只有偵測到剛好一隻手」時才會判斷，雙手都在畫面裡時
     一律先看是否符合 josuke_pose。
+
+    ok_sign（秤金次用）、snap_pinch（五條悟用）三種捏合形狀，靠捏合的是哪根手指、
+    其餘手指是否伸直來互相區分，理論上不會混淆，但實際測試若鏡頭角度不佳導致誤判，
+    可調整 PINCH_MAX_RATIO 等門檻。
+
+    sukuna_domain（宿儺）實際是「雙手」一起交疊舉在嘴巴前面的手勢，不是單手動作；
+    因為雙手手指緊密交疊時，21 點手部關鍵點模型很容易因為遮擋誤判每隻手的手指角度，
+    所以主要判斷方式改成「雙手手腕靠在一起 + 舉在嘴巴附近」（不特別檢查手指細節），
+    跟位置更自由的 reverse_cross_palms 用「有沒有貼近嘴巴」來區分。
+    sukuna_mudra 這個單手形狀/判斷保留當備援（萬一鏡頭只清楚拍到其中一隻手），
+    但不是主要判斷路徑。
     """
 
     def __init__(
@@ -316,6 +402,41 @@ class GestureDetector:
             if both_fists and _is_stacked(hand_a["wrist"], hand_b["wrist"]):
                 return "double_fist_stacked"
 
+            # 乙骨優太「真贋相愛」：一手握拳、另一手四指伸直（不特別限制相對位置/是否併攏）
+            for fist_hand, open_hand in ((hand_a, hand_b), (hand_b, hand_a)):
+                if fist_hand["shape"] == "fist" and open_hand["shape"] in ("open_palm", "flat_hand"):
+                    return "yuta_domain"
+
+            # 秤金次「坐殺博徒」：一手比 OK 手勢（在上）、另一手四指伸直在下方
+            for ok_hand, straight_hand in ((hand_a, hand_b), (hand_b, hand_a)):
+                if (
+                    ok_hand["shape"] == "ok_sign"
+                    and straight_hand["shape"] in ("open_palm", "flat_hand")
+                    and straight_hand["wrist"][1] > ok_hand["wrist"][1]
+                ):
+                    return "hakari_domain"
+
+            # 宿儺：雙手手指緊密交疊、舉在嘴巴前面（比反叉合掌多一個「貼近嘴巴」的位置限制，
+            # 用來跟位置更自由的 reverse_cross_palms 區分）。不特別要求手指的精確形狀，
+            # 因為兩手手指緊密交疊時，關鍵點模型的角度判斷常常被遮擋誤導，很難準確算出來
+            if (
+                hand_a["shape"] not in ("fist", "rock_horns")
+                and hand_b["shape"] not in ("fist", "rock_horns")
+                and distance(hand_a["wrist"], hand_b["wrist"]) < SUKUNA_HANDS_TOGETHER_MAX_DIST
+                and pose_points
+                and _near_chin(midpoint(hand_a["wrist"], hand_b["wrist"]), pose_points)
+            ):
+                return "sukuna_domain"
+
+            # 反叉合掌：雙手手腕緊貼在一起（合十），且都不是握拳/rock 手勢
+            # （fist_up_down、double_fist_stacked 已經在上面優先判斷過，這裡排除避免搶先觸發）
+            if (
+                hand_a["shape"] not in ("fist", "rock_horns")
+                and hand_b["shape"] not in ("fist", "rock_horns")
+                and _is_palms_touching(hand_a["wrist"], hand_b["wrist"])
+            ):
+                return "reverse_cross_palms"
+
             # 下巴那隻手不特別區分「併攏(flat_hand)」還是「張開(open_palm)」，
             # 只要五指是伸直的即可（實際測試發現嚴格要求併攏反而常常判斷不出來）
             for ear_hand, chin_hand in ((hand_a, hand_b), (hand_b, hand_a)):
@@ -336,6 +457,10 @@ class GestureDetector:
                 return "pointing_finger"
             if hand["shape"] == "claw":
                 return "claw_reach"
+            if hand["shape"] == "sukuna_mudra":
+                return "sukuna_domain"
+            if hand["shape"] == "snap_pinch":
+                return "gojo_domain"
             # cover_one_eye（阿嬤特拉斯）本身是「單手」動作，這裡限制只有偵測到剛好一隻手時才判斷，
             # 避免在雙手比 josuke_pose（東方仗助）但角度沒對齊時，被誤判成 cover_one_eye
             if (

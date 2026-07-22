@@ -4,10 +4,10 @@
 在螢幕角落彈出對應的謎因（meme）圖片。目前是一個在本機直接執行的 Python 小工具，
 未來可視需求再擴充成網頁版。
 
-> 目前版本已移除臉部表情偵測功能，改成 6 種依實際 meme 圖片手勢設計的專屬動作辨識
+> 目前版本已移除臉部表情偵測功能，改成 11 種依實際 meme 圖片手勢設計的專屬動作辨識
 > （只用 `HandLandmarker` + `PoseLandmarker`，不再需要 `FaceLandmarker`）。
 
-## 功能總覽：6 種手勢動作
+## 功能總覽：11 種手勢動作
 
 每種手勢都是照對應 meme 圖片裡實際的手部/身體動作設計，不是隨便挑一個相近手勢代替：
 
@@ -19,10 +19,21 @@
 | `fist_up_down` | 敗者食塵 | 雙手都比類似 rock 的手勢（食指、小指伸直，中指、無名指彎曲），一手手肘彎曲讓手朝上舉高、另一手讓手朝下/朝前 |
 | `cover_one_eye` | 阿嬤特拉斯（佐助血輪眼） | 單手五指張開放在臉前，剛好遮住一隻眼睛、另一隻眼睛露出 |
 | `josuke_pose` | 東方仗助 | 雙手同時比出不同形狀：一手五指張開貼在臉的一側（太陽穴/耳朵附近），另一手五指伸直併攏貼在下巴附近 |
+| `yuta_domain` | 乙骨優太（真贋相愛） | 一手握拳（手掌朝下），另一手四指伸直朝外、拇指內縮（不限制兩手相對位置） |
+| `sukuna_domain` | 宿儺 | 雙手手指緊密交疊，舉在嘴巴前面（雙手手勢，不是單手；⚠️ 手指遮擋嚴重，主要用「雙手貼在一起 + 靠近嘴巴」的位置判斷） |
+| `hakari_domain` | 秤金次（坐殺博徒） | 一手拇指+食指捏成一個圈（類似 OK 手勢，其餘三指伸直），另一手在下方、四指伸直 |
+| `gojo_domain` | 五條悟（無量空處） | 單手食指伸直，中指彎曲並與食指指尖捏合在一起，無名指、小指彎曲收起 |
+| `reverse_cross_palms` | 反叉合掌 | 雙手手腕緊貼在一起（合十），且都不是握拳/rock 手勢；⚠️ 這個手勢手指深度交疊，遮擋嚴重，實際只用「雙手貼在一起」做近似判斷，精準度較低 |
 
 > `pointing_finger`（及川徹）與 `claw_reach`（綠谷出久）容易搞混，因為兩者都可能有手指
 > 微微伸直的情況；所以特別把 `pointing_finger` 加上「手臂需伸直向前伸」的額外條件，
 > 用來跟手臂不需伸直的 `claw_reach` 做區分。
+>
+> `ok_sign`（秤金次）、`snap_pinch`（五條悟）、`sukuna_mudra`（宿儺）三種形狀都是
+> 「手指捏合」的變化：捏合的手指（食指/中指/無需捏合）跟其餘手指是否伸直不同，
+> 理論上可以互相區分，但都是「靠近臉部的手部特寫」動作，鏡頭角度不佳時仍可能誤判，
+> 需要依實測調整 `PINCH_MAX_RATIO`、`SUKUNA_BENT_ANGLE_MAX` 等門檻
+> （見 `detectors/gesture_detector.py`）。
 
 - 偵測到後會依照 `mapping/mapping.json` 對照表，在螢幕角落彈出對應圖片，幾秒後自動消失
 - 內建去抖動/冷卻機制，避免畫面閃爍或同一張圖連續彈出
@@ -51,7 +62,7 @@ pip install -r requirements.txt
 # 3. 下載 MediaPipe 模型檔（只需要執行一次，需要網路連線）
 python scripts/download_models.py
 
-# 4. 執行主程式（images/ 內已經放好 6 張對應的 meme 圖片，不需要額外產生預留圖）
+# 4. 執行主程式（images/ 內已經放好 11 張對應的 meme 圖片，不需要額外產生預留圖）
 python main.py
 ```
 
@@ -73,11 +84,11 @@ AnimeMeme/
   config.yaml                  # 攝影機編號、門檻值、冷卻時間等設定
   requirements.txt
   detectors/
-    gesture_detector.py        # Hands/Pose + 6 種手勢規則分類器
+    gesture_detector.py        # Hands/Pose + 11 種手勢規則分類器
   mapping/
     mapping.json               # 標籤 -> 圖片路徑對照表
     mapping_loader.py
-  images/                      # 6 種手勢對應的 meme 圖片素材
+  images/                      # 11 種手勢對應的 meme 圖片素材
   models/                      # MediaPipe 模型檔（執行 download_models.py 後會自動產生，不進版控）
   ui/
     popup_window.py            # Tkinter 彈出視窗（顯示/自動關閉）
@@ -161,6 +172,10 @@ AnimeMeme/
 - `cover_one_eye`（阿嬤特拉斯）與 `josuke_pose`（東方仗助）需要同時判斷手與臉/身體
   的相對位置，是用 Pose 模型輸出的眼睛/耳朵/嘴角關鍵點做近似判斷，精準度不如專門的
   臉部網格模型，但換來不需要額外載入 `FaceLandmarker` 模型。
+- `reverse_cross_palms`（反叉合掌）與 `sukuna_domain`（宿儺）都是雙手手指深度交疊、
+  互相遮擋的姿勢，單一 RGB 鏡頭的 21 點手部關鍵點模型在手指重疊時準確度會明顯下降，
+  目前分別用「雙手手腕貼在一起」「雙手手腕貼在一起 + 靠近嘴巴」做粗略近似，
+  沒有真的檢查手指交叉/彎曲細節，穩定度比其他手勢差。
 - 目前是純本機 Python 小工具；未來若要做成網頁版，可以將 `mapping.json` 與 `images/` 素材
   直接沿用，改用瀏覽器端的 MediaPipe Tasks Web (JavaScript) 重寫偵測邏輯即可。
 - 若要打包成雙擊執行的 `.exe`，可以使用 `PyInstaller`（`pyinstaller main.py`），

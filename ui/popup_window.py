@@ -14,8 +14,8 @@ class PopupWindow:
     def __init__(
         self,
         root: tk.Tk,
-        width: int = 1000,
-        height: int = 1000,
+        width: int = 400,
+        height: int = 400,
         duration_seconds: float = 3.0,
         position: str = "center",
     ):
