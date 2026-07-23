@@ -12,8 +12,9 @@
 
 另外新增 5 種「領域展開」相關手勢：
 - yuta_domain          乙骨優太（真贋相愛）：一手握拳（手掌朝下），另一手四指伸直朝外、拇指內縮
-- sukuna_domain        宿儺：雙手手指緊密交疊，舉在嘴巴前面（不是單手動作；因為手指遮擋嚴重，
-                       主要靠「雙手貼在一起 + 靠近嘴巴」的位置判斷，不特別檢查手指細節）
+- sukuna_domain        宿儺：雙手手指緊密交疊，舉在嘴巴前面，形狀是手腕分開、指尖收攏的
+                       三角錐狀（不是單手動作；因為手指遮擋嚴重，主要靠「手腕距離 > 指尖
+                       距離」+「靠近嘴巴」的位置判斷，不特別檢查手指細節）
 - hakari_domain        秤金次（坐殺博徒）：一手拇指+食指捏成圈（類似 OK 手勢，其餘三指伸直），
                        另一手在下方、四指伸直
 - gojo_domain          五條悟（無量空處）：單手食指伸直，中指彎曲並與食指指尖捏合在一起，
@@ -101,9 +102,14 @@ SUKUNA_TOUCH_MAX_RATIO = 0.25
 PALMS_TOUCH_MAX_DIST = 0.08
 
 # 宿儺手勢（雙手版）：雙手手指緊密交疊舉在嘴巴前面，手腕距離門檻比反叉合掌寬鬆一點
-# （兩手交疊時手腕本身不一定完全貼在一起），但額外要求「舉在嘴巴附近」，
-# 用這個位置限制跟位置更自由的反叉合掌（reverse_cross_palms）做區分
+# （兩手交疊時手腕本身不一定完全貼在一起），但額外要求「舉在嘴巴附近」
 SUKUNA_HANDS_TOGETHER_MAX_DIST = 0.22
+
+# 宿儺（手腕分開、指尖收攏的三角錐狀）跟反叉合掌（手腕、指尖都貼在一起的平行合掌狀）
+# 光看「手腕距離」很容易搞混，因為兩者的手腕距離範圍會重疊。
+# 關鍵差異是：宿儺的「手腕距離」會明顯大於「指尖距離」（上窄下寬），
+# 反叉合掌則兩者差不多（整段都窄）。用這個差值當作宿儺的額外判斷條件。
+SUKUNA_CONVERGENCE_MARGIN = 0.04
 
 # Pose landmark 索引（MediaPipe Pose 33 點）
 POSE_NOSE = 0
@@ -158,6 +164,15 @@ def _fingertip_spread(points, hand_size: float) -> float:
 def _tip_distance_ratio(points, idx_a: int, idx_b: int, hand_size: float) -> float:
     """回傳兩個指尖 landmark 索引之間的距離（相對手掌大小），用來判斷是否「捏合/互碰」。"""
     return distance(points[idx_a], points[idx_b]) / hand_size
+
+
+def _fingertip_centroid(points):
+    """回傳五指指尖的重心點，近似這隻手手指延伸到的位置，
+    比單獨看某一根指尖更能抵抗遮擋造成的單點誤判。"""
+    tip_indices = (4, 8, 12, 16, 20)
+    xs = sum(points[i][0] for i in tip_indices) / len(tip_indices)
+    ys = sum(points[i][1] for i in tip_indices) / len(tip_indices)
+    return (xs, ys)
 
 
 def _classify_hand_shape(points) -> str | None:
@@ -320,8 +335,11 @@ class GestureDetector:
 
     sukuna_domain（宿儺）實際是「雙手」一起交疊舉在嘴巴前面的手勢，不是單手動作；
     因為雙手手指緊密交疊時，21 點手部關鍵點模型很容易因為遮擋誤判每隻手的手指角度，
-    所以主要判斷方式改成「雙手手腕靠在一起 + 舉在嘴巴附近」（不特別檢查手指細節），
-    跟位置更自由的 reverse_cross_palms 用「有沒有貼近嘴巴」來區分。
+    所以主要判斷方式改成幾何近似：手腕距離、指尖距離、跟嘴巴的距離。
+    sukuna_domain 跟 reverse_cross_palms 都是「雙手貼在一起舉高」的姿勢，光看手腕距離
+    很容易搞混（兩者的手腕距離範圍會重疊），所以宿儺額外要求「手腕距離明顯大於指尖
+    距離」（手腕分開、指尖收攏的三角錐狀）+「靠近嘴巴」，反叉合掌則是手腕跟指尖都
+    貼在一起的平行合掌狀，兩者形狀本質不同，用這個差異來區分，不是單純比手腕距離。
     sukuna_mudra 這個單手形狀/判斷保留當備援（萬一鏡頭只清楚拍到其中一隻手），
     但不是主要判斷路徑。
     """
@@ -416,13 +434,20 @@ class GestureDetector:
                 ):
                     return "hakari_domain"
 
-            # 宿儺：雙手手指緊密交疊、舉在嘴巴前面（比反叉合掌多一個「貼近嘴巴」的位置限制，
-            # 用來跟位置更自由的 reverse_cross_palms 區分）。不特別要求手指的精確形狀，
-            # 因為兩手手指緊密交疊時，關鍵點模型的角度判斷常常被遮擋誤導，很難準確算出來
+            # 宿儺：雙手手指緊密交疊、舉在嘴巴前面，形狀是「手腕分開、指尖收攏」的三角錐狀
+            # （手腕距離明顯大於指尖距離），用這點跟手腕/指尖都貼在一起的 reverse_cross_palms
+            # 做區分，而不是單純比較手腕距離（因為兩者的手腕距離範圍其實會重疊，
+            # 容易讓反叉合掌被誤判成宿儺）。不特別要求手指的精確形狀，因為兩手手指緊密
+            # 交疊時，關鍵點模型的角度判斷常常被遮擋誤導，很難準確算出來。
+            wrist_gap = distance(hand_a["wrist"], hand_b["wrist"])
+            fingertip_gap = distance(
+                _fingertip_centroid(hand_a["points"]), _fingertip_centroid(hand_b["points"])
+            )
             if (
                 hand_a["shape"] not in ("fist", "rock_horns")
                 and hand_b["shape"] not in ("fist", "rock_horns")
-                and distance(hand_a["wrist"], hand_b["wrist"]) < SUKUNA_HANDS_TOGETHER_MAX_DIST
+                and wrist_gap < SUKUNA_HANDS_TOGETHER_MAX_DIST
+                and wrist_gap - fingertip_gap > SUKUNA_CONVERGENCE_MARGIN
                 and pose_points
                 and _near_chin(midpoint(hand_a["wrist"], hand_b["wrist"]), pose_points)
             ):
